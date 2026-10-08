@@ -4,7 +4,7 @@ namespace TypechoPlugin\CommentToMail;
 
 use \Typecho\{Widget};
 use \Typecho\Widget\Helper\Form;
-use \Typecho\Widget\Helper\Form\Element\{Text, Hidden, Submit, Textarea};
+use \Typecho\Widget\Helper\Form\Element\{Text, Hidden, Submit, Textarea, Radio};
 
 /**
  * CommentToMail
@@ -113,9 +113,18 @@ class Console extends Widget
         /** 构建表单 */
         $options = Widget::widget('Widget_Options');
         $form = new Form(
-            \Typecho\Common::url('/action/' . Plugin::$_action, $options->index),
+            // 带 CSRF token 的提交地址，Action 端会校验
+            \Utils\Helper::security()->getIndex('/action/' . Plugin::$_action),
             Form::POST_METHOD
         );
+
+        /** 邮件模板 */
+        $template = new Radio('template', [
+            'none'  => _t('不使用模板'),
+            'owner' => _t('博主通知 owner.html'),
+            'guest' => _t('访客回复 guest.html'),
+        ], 'none', _t('邮件模板'), _t('选择模板时用示例评论渲染模板发送，忽略下方邮件内容'));
+        $form->addInput($template);
 
         /** 收件人名称 */
         $toName = new Text('toName', NULL, NULL, _t('收件人名称'), _t('为空则使用博主昵称'));
@@ -126,11 +135,11 @@ class Console extends Widget
         $form->addInput($to);
 
         /** 邮件标题 */
-        $title = new Text('title', NULL, NULL, _t('邮件标题 *'));
+        $title = new Text('title', NULL, NULL, _t('邮件标题'), _t('使用模板时为空则按插件设置的标题格式生成'));
         $form->addInput($title);
 
         /** 邮件内容 */
-        $content = new Textarea('content', NULL, NULL, _t('邮件内容 *'));
+        $content = new Textarea('content', NULL, NULL, _t('邮件内容'), _t('不使用模板时必填'));
         $content->input->setAttribute('class', 'w-100 mono');
         $form->addInput($content);
 
@@ -148,9 +157,8 @@ class Console extends Widget
         $submit->value('发送邮件');
 
         /** 添加规则 */
+        // 标题、内容是否必填取决于是否选择模板，由 Action::testMail() 校验
         $to->addRule('email', _t('非法的邮件地址'));
-        $title->addRule('required', _t('邮件标题不能为空'));
-        $content->addRule('required', _t('邮件内容不能为空'));
 
         return $form;
     }

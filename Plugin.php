@@ -19,8 +19,6 @@ use \Typecho\Widget\Helper\Form\Element\{Password, Text, Radio, Checkbox};
 
 if (!defined('__TYPECHO_ROOT_DIR__')) exit;
 
-require_once 'Log.php';
-
 /**
  * Plugin
  * 
@@ -136,7 +134,8 @@ class Plugin implements PluginInterface
 				'validate' => '服务器需要验证',
 				'ssl' => 'ssl加密',
 				'tls' => 'tls加密',
-				'solve544' => '启用抄送以规避544错误'
+				'solve544' => '启用抄送以规避544错误',
+				'insecure' => '跳过SMTP证书校验（仅服务器使用自签名证书时勾选）'
 			],
 			['validate'],
 			'SMTP验证'
@@ -205,7 +204,7 @@ class Plugin implements PluginInterface
 				'to_owner' => '有评论及回复时, 发邮件通知博主.',
 				'to_guest' => '评论被回复时, 发邮件通知评论者.',
 				'to_me' => '自己回复自己的评论时, 发邮件通知. (同时针对博主和访客)',
-				'isSync' => '同步发送邮件，否则需要手动（或者用定时任务自动）执行发送任务',
+				'isSync' => '同步发送邮件（评论提交时当场发送）。不勾选则在页面返回后由后台发送（需 PHP-FPM），定时任务仅用于重试失败的邮件',
 			],
 			['to_owner', 'to_guest'],
 			'其他设置',
@@ -222,7 +221,7 @@ class Plugin implements PluginInterface
 			null,
 			\Typecho\Common::randString(16),
 			_t('Key'),
-			_t('执行发送任务地址为' . $deliverMailUrl)
+			_t('执行发送任务地址为' . $deliverMailUrl . '，可配置低频定时任务（如每 30 分钟）访问以重试失败的邮件')
 		);
 		$form->addInput($key->addRule('required', _t('key 不能为空.')));
 	}
@@ -245,8 +244,8 @@ class Plugin implements PluginInterface
 		$installDb = Db::get();
 
         $adapter = explode('_', $installDb->getAdapterName());
-		$adapter_typ = array_pop($adapter); //数据库类型 mysql/sqlite/postgres
-        if ($adapter_typ == "Mysqli") $type = "Mysql";
+		$adapter_typ = array_pop($adapter); //数据库类型 Mysql/Mysqli/Pgsql/SQLite
+        if ($adapter_typ == "Mysqli") $adapter_typ = "Mysql"; // Mysqli 与 Pdo_Mysql 共用同一份建表脚本
         $supported_adapter = ["Mysql", "Pgsql", "SQLite"];
         if (!in_array($adapter_typ, $supported_adapter)) {
             throw new \Typecho\Plugin\Exception('数据表建立失败, 不支持的数据库驱动, (仅支持 Mysql, SQLite, PgSQL)');
@@ -266,7 +265,7 @@ class Plugin implements PluginInterface
 			return '建立邮件队列数据表成功, 请继续设置SMTP信息';
 		} catch (\Typecho\Db\Exception $e) {
 			$code = $e->getCode();
-			if (($type === 'Mysql' && $code === 1050) || ($type === 'SQLite' && ($code === 'HY000' || $code === 1))) {
+			if (($adapter_typ === 'Mysql' && $code === 1050) || ($adapter_typ === 'SQLite' && ($code === 'HY000' || $code === 1))) {
 				try {
 					$script = "SELECT `id`, `content`, `sent` FROM `{$prefix}mail`";
 					$installDb->query($script, Db::READ);
@@ -314,15 +313,30 @@ class Plugin implements PluginInterface
 			])
 		);
 
-		// 如果同步就直接发邮件，否则添加至队列
-		$keySync = Helper::options()->plugin('CommentToMail')->key;		
-		$optionsSync = Widget::widget('Widget_Options');
-		$entryUrlSync = ($optionsSync->rewrite) ? $optionsSync->siteUrl : $optionsSync->siteUrl . 'index.php'; // 博客网址
-		$deliverUrlSync = rtrim($entryUrlSync, '/') . '/action/' . self::$_action . '?do=deliverMail&key=' . $keySync;;
-		
-		$isSync = Helper::options()->plugin('CommentToMail')->other;
-		if (in_array('isSync', $isSync)){
-			file_get_contents($deliverUrlSync);
+		// 同步模式：当场发送；异步模式：先把响应返回给评论者，再在同一进程里投递队列
+		// （原实现异步时只入队，依赖外部定时访问 deliverMail，未配置定时任务时邮件永远不会发出）
+		$other = (array) Helper::options()->plugin('CommentToMail')->other;
+		if (in_array('isSync', $other)) {
+			self::deliverQueue();
+		} elseif (function_exists('fastcgi_finish_request')) {
+			register_shutdown_function(function () {
+				fastcgi_finish_request();
+				self::deliverQueue();
+			});
+		}
+	}
+
+	/**
+	 * 在当前进程中投递邮件队列，失败只记日志，不影响评论提交
+	 *
+	 * @return void
+	 */
+	public static function deliverQueue(): void
+	{
+		try {
+			Widget::widget('TypechoPlugin\CommentToMail\Action')->processQueue();
+		} catch (\Throwable $e) {
+			error_log('CommentToMail deliverQueue: ' . $e->getMessage());
 		}
 	}
 	

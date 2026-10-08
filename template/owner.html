@@ -1,45 +1,89 @@
-<div
-    style="width: 550px;height: auto;border-radius: 5px;margin:0 auto;box-shadow: 0px 0px 20px #888888;position: relative;">
-    <div
-        style="background-image: url(https://s1.328888.xyz/2022/06/08/zcnnd.png);width:550px;height: 250px;background-size: cover;background-repeat: no-repeat;border-radius: 5px 5px 0px 0px;">
-    </div>
-    <div
-        style="background-color:white;line-height:180%;padding:0 15px 12px;width:520px;margin:10px auto;color:#555555;font-family:'Century Gothic','Trebuchet MS','Hiragino Sans GB',微软雅黑,'Microsoft Yahei',Tahoma,Helvetica,Arial,'SimSun',sans-serif;font-size:12px;margin-bottom: 0px;">
-        <h2 style="font-size:14px;font-weight:normal;padding:13px 0 10px 8px;">
-            <span style="color: #ff7272;font-weight: bold;"></span>
-            您的<a style="text-decoration:none;color: #ff7272;" href="{{permalink}}" target="_blank">
-                《{{title}}》
-            </a>有了新的回复:
-        </h2>
-        <div style="padding:0 12px 0 12px;margin-top:18px">
-            <p><strong>{{author}}</strong>&nbsp;给您的评论: </p>
-            <style type="text/css">
-                .comment>img {
-                    margin: 0px 6px 5px 6px;
-                    width: 25px;
-                }
-            </style>
-            <p class="comment"
-                style="background-color: #f5f5f5;border: 0px solid #DDD;border-radius: 5px;padding: 10px 15px;margin:18px 0">
-                {{text}}</p>
-            <p>详细信息: </p>
-            <p
-                style="background-color: #f5f5f5;border: 0px solid #DDD;border-radius: 5px;padding: 10px 15px;margin:18px 0">
-                IP: {{ip}}
-                <br />
-                邮箱: <a style="text-decoration:none;color: #ff7272;" href="mailto:{{mail}}">{{mail}}</a>
-                <br />
-                时间: {{time}}
-                <br />
-                状态: {{status}} [<a style="text-decoration:none;color: #ff7272;" href='{{manage}}'
-                    target='_blank'>管理评论</a>]
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
+    <title>新评论通知</title>
+    <style>
+        /* 配色与博客 dear 主题一致；内联样式为浅色默认值，支持的客户端按系统切换深色 */
+        @media (prefers-color-scheme: dark) {
+            .bg { background-color: #111 !important; }
+            .heading { color: #eee !important; }
+            .text { color: #ddd !important; }
+            .muted { color: #888 !important; }
+            .quote { color: #aaa !important; }
+            .line { border-color: #444 !important; }
+            .link { color: #ccc !important; border-color: #ccc !important; }
+        }
+    </style>
+</head>
+<body class="bg" style="margin: 0; padding: 0; background-color: #fff; -webkit-text-size-adjust: 100%;">
+<table role="presentation" class="bg" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #fff;">
+<tr>
+<td align="center" style="padding: 20px;">
+<!--[if mso]><table role="presentation" width="660" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 660px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Ubuntu, 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif; font-size: 16px; line-height: 1.7; color: #444; text-align: left;">
+
+    <!-- 页头：站点名，同博客标题 -->
+    <tr>
+        <td style="padding: 20px 0;">
+            <h1 class="heading" style="margin: 0; font-size: 24px; font-weight: bold; color: #222;">{{siteTitle}}</h1>
+        </td>
+    </tr>
+
+    <!-- 正文 -->
+    <tr>
+        <td class="text" style="color: #444;">
+            <h2 class="heading" style="margin: 0 0 16px; font-size: 18px; font-weight: bold; color: #222;">新评论</h2>
+            <p style="margin: 0 0 24px;">
+                文章 <a class="link" href="{{permalink}}" target="_blank" style="color: #333; text-decoration: none; border-bottom: 1px solid #333;">{{title}}</a> 收到一条新评论：
             </p>
-        </div>
-    </div>
-    <a style="text-decoration: none;color: rgb(255, 255, 255);width: 40%;text-align: center;background-color: rgb(255, 114, 114);height: 40px;line-height: 40px;box-shadow: 3px 3px 3px rgba(0, 0, 0, 0.3);display: block;margin: auto;"
-        href="{{permalink}}" target="_blank">查看回复的完整內容</a>
-    <div
-        style="color:#8c8c8c;;font-family: 'Century Gothic','Trebuchet MS','Hiragino Sans GB',微软雅黑,'Microsoft Yahei',Tahoma,Helvetica,Arial,'SimSun',sans-serif;font-size: 10px;width: 100%;text-align: center; padding-bottom: 1px;">
-        <p>©2019-2020 Copyright {{siteTitle}}</p>
-    </div>
-</div>
+
+            <!-- 评论：同博客评论列表，作者加粗 + 时间小字 -->
+            <p style="margin: 0;">
+                <strong class="heading" style="font-size: 14px; color: #222;">{{author}}</strong>
+            </p>
+            <p class="muted" style="margin: 0 0 8px; font-size: 12px; color: #767676; font-variant-numeric: tabular-nums;">{{time}}</p>
+            <div class="quote line" style="margin: 0 0 24px; padding: 0 0 0 20px; border-left: 2px solid #ddd; color: #666;">{{text}}</div>
+
+            <!-- 评论者信息：同博客文章列表，左列固定宽度的灰色标签 -->
+            <table role="presentation" class="line" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top: 1px dashed #ddd; font-size: 14px;">
+                <tr>
+                    <td class="muted" width="80" valign="top" style="padding: 12px 0 4px; color: #767676;">邮箱</td>
+                    <td style="padding: 12px 0 4px; word-break: break-all;"><a class="link" href="mailto:{{mail}}" style="color: #333; text-decoration: none;">{{mail}}</a></td>
+                </tr>
+                <tr>
+                    <td class="muted" width="80" valign="top" style="padding: 4px 0; color: #767676;">IP</td>
+                    <td style="padding: 4px 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;">{{ip}}</td>
+                </tr>
+                <tr>
+                    <td class="muted" width="80" valign="top" style="padding: 4px 0 12px; color: #767676;">状态</td>
+                    <td style="padding: 4px 0 12px;">{{status}}</td>
+                </tr>
+            </table>
+
+            <!-- 操作：文字链接，不用按钮 -->
+            <p class="line" style="margin: 0; padding: 16px 0 0; border-top: 1px dashed #ddd;">
+                <a class="link" href="{{permalink}}" target="_blank" style="color: #333; text-decoration: none; border-bottom: 1px solid #333;">查看评论</a>
+                <span class="muted" style="color: #767676;">&nbsp;·&nbsp;</span>
+                <a class="link" href="{{manage}}" target="_blank" style="color: #333; text-decoration: none; border-bottom: 1px solid #333;">管理评论</a>
+            </p>
+        </td>
+    </tr>
+
+    <!-- 页脚：同博客 footer，灰色小字 -->
+    <tr>
+        <td class="muted" style="padding: 32px 0 20px; font-size: 13px; color: #767676;">
+            此邮件由 {{siteTitle}} 自动发送
+        </td>
+    </tr>
+
+</table>
+<!--[if mso]></td></tr></table><![endif]-->
+</td>
+</tr>
+</table>
+</body>
+</html>

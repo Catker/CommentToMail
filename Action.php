@@ -12,7 +12,7 @@ namespace TypechoPlugin\CommentToMail;
 
 use \Utils\Helper;
 use \Typecho\{Widget, Db};
-use \TypechoPlugin\CommentToMail\lib\Email;
+use \TypechoPlugin\CommentToMail\lib\{Email, Comment};
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
@@ -30,6 +30,14 @@ require_once 'PHPMailer/Exception.php';
  */
 class Action extends Widget implements \Widget\ActionInterface
 {
+    /** 队列状态（mail.sent 字段）：待发送 / 已发送 / 多次失败已放弃 */
+    private const SENT_PENDING = 0;
+    private const SENT_DONE = 1;
+    private const SENT_GAVE_UP = 2;
+
+    /** 单条队列最多失败次数 */
+    private const MAX_ATTEMPTS = 5;
+
     /** 
      * 数据库对象 
      * 
@@ -96,9 +104,11 @@ class Action extends Widget implements \Widget\ActionInterface
     {
         $this->init();
 
-        $this->on($this->request->is('do=deliverMail'))->deliverMail($this->request->key);  //邮件队列
+        $this->on($this->request->is('do=deliverMail'))->deliverMail((string) $this->request->key);  //邮件队列
 
-        if (!$this->_user->hasLogin()) $this->response->redirect($this->_options->loginUrl); //用户未登录
+        // 发测试信、改模板只允许管理员，并校验 CSRF token
+        $this->_user->pass('administrator');
+        Helper::security()->protect();
         $this->on($this->request->is('do=testMail'))->testMail();                           //测试邮件
         $this->on($this->request->is('do=editTheme'))->editTheme($this->request->edit);     //编辑主题
     }
@@ -116,6 +126,11 @@ class Action extends Widget implements \Widget\ActionInterface
         $this->_user = $this->widget('\Widget\User');
         $this->_options = $this->widget('\Widget\Options');
         $this->_cfg = Helper::options()->plugin('CommentToMail');
+
+        // 复选框一项都不勾时配置值可能为 null，统一成数组，避免 in_array 抛 TypeError
+        foreach (['other', 'status', 'validate'] as $name) {
+            $this->_cfg->$name = (array) $this->_cfg->$name;
+        }
     }
 
     /**
@@ -126,44 +141,112 @@ class Action extends Widget implements \Widget\ActionInterface
      */
     private function deliverMail(string $key): void
     {
-        if ($key != $this->_cfg->key) {
+        $expected = (string) $this->_cfg->key;
+        if ($expected === '' || !hash_equals($expected, $key)) {
             $this->response->throwJson([
                 'code' => -1,
                 'msg' => 'Permission deniend'
             ]);
         }
 
-        $mailQueue = $this->_db->fetchAll($this->_db->select('id', 'content')->from($this->_prefix . 'mail')->where('sent = ?', 0)); // 获取所有未发送的邮件
+        $this->response->throwJson(array_merge(['code' => 0, 'msg' => 'success'], $this->processQueue()));
+    }
 
-        //计数器
-        $success = 0;
-        foreach ($mailQueue as &$mail) {
-
-            $this->_comment = unserialize(base64_decode($mail['content']));
-
-            /** 发送邮件 */
-            if (!$this->_comment) continue;
-
-            if ($this->processMail()) {
-                $this->_db->query($this->_db->update($this->_prefix . 'mail')->rows(['sent' => 1])->where('id = ?', $mail['id'])); //标识为已发送
-                $success++;
-            }
-
-            usleep(100); //休眠100毫秒 防止QPS限制
+    /**
+     * 发送队列中所有未发送的邮件
+     *
+     * 供 deliverMail 接口和评论提交后的后台投递共用
+     *
+     * @return array
+     */
+    public function processQueue(): array
+    {
+        if (!isset($this->_db)) {
+            $this->init();
         }
-        //清除已发送的数据
-        $this->_db->query(
-            $this->_db->delete($this->_prefix . 'mail')->where('sent = ?', 1)
-        );
-        $this->response->throwJson([
-            'code' => 0,
-            'msg' => 'success',
-            'count' => [
-                'all' => count($mailQueue),
-                'success' => $success,
-                'fail' => count($mailQueue) - $success,
-            ],
-        ]);
+
+        $count = ['all' => 0, 'success' => 0, 'fail' => 0];
+
+        // 文件锁：同一时刻只允许一个进程处理队列，防止并发评论 / 定时任务读到同一批记录重复发信
+        // 拿不到锁说明已有进程在处理，它会循环取到本次新入队的记录，这里直接返回
+        $lock = @fopen(sys_get_temp_dir() . '/CommentToMail-' . md5(__DIR__) . '.lock', 'c');
+        if (!$lock) {
+            error_log('[CommentToMail] cannot open queue lock file, processing without lock');
+        } elseif (!flock($lock, LOCK_EX | LOCK_NB)) {
+            fclose($lock);
+            return ['count' => $count, 'locked' => true];
+        }
+
+        $tried = []; // 本轮已处理过的 id，失败的本轮不再重试
+        try {
+            do {
+                $rows = array_filter(
+                    $this->_db->fetchAll($this->_db->select('id', 'content')->from($this->_prefix . 'mail')->where('sent = ?', self::SENT_PENDING)),
+                    fn($row) => !isset($tried[$row['id']])
+                );
+
+                foreach ($rows as $row) {
+                    $tried[$row['id']] = true;
+                    $this->deliverRow($row) ? $count['success']++ : $count['fail']++;
+                    usleep(100000); //休眠100毫秒 防止QPS限制
+                }
+            } while ($rows); // 处理期间新入队的记录也一并发出
+
+            //清除已发送的数据
+            $this->_db->query(
+                $this->_db->delete($this->_prefix . 'mail')->where('sent = ?', self::SENT_DONE)
+            );
+        } finally {
+            if ($lock) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
+        }
+
+        $count['all'] = count($tried);
+        return ['count' => $count];
+    }
+
+    /**
+     * 投递单条队列记录
+     *
+     * 成功标记为已发送；失败则把已成功的对象和失败次数写回记录，下次只重试失败的对象，
+     * 超过 MAX_ATTEMPTS 次后标记为放弃（保留在表中便于排查）
+     *
+     * @param array $row
+     * @return bool
+     */
+    private function deliverRow(array $row): bool
+    {
+        // 只允许还原队列自身写入的类型，防止对象注入
+        $commentData = unserialize(base64_decode($row['content']), ['allowed_classes' => [Comment::class, \stdClass::class]]);
+        if (!($commentData instanceof Comment || $commentData instanceof \stdClass)) {
+            error_log('[CommentToMail] invalid queue content, id ' . $row['id']);
+            $this->_db->query($this->_db->update($this->_prefix . 'mail')->rows(['sent' => self::SENT_GAVE_UP])->where('id = ?', $row['id']));
+            return false;
+        }
+
+        // 将 stdClass 转换为 Comment 对象
+        $this->_comment = new Comment();
+        foreach (get_object_vars($commentData) as $key => $value) {
+            if (property_exists($this->_comment, $key)) {
+                $this->_comment->$key = $value;
+            }
+        }
+
+        if ($this->processMail()) {
+            $this->_db->query($this->_db->update($this->_prefix . 'mail')->rows(['sent' => self::SENT_DONE])->where('id = ?', $row['id'])); //标识为已发送
+            return true;
+        }
+
+        $this->_comment->attempts++;
+        $rows = ['content' => base64_encode(serialize($this->_comment))];
+        if ($this->_comment->attempts >= self::MAX_ATTEMPTS) {
+            error_log('[CommentToMail] give up coid ' . $this->_comment->coid . ' after ' . $this->_comment->attempts . ' attempts');
+            $rows['sent'] = self::SENT_GAVE_UP;
+        }
+        $this->_db->query($this->_db->update($this->_prefix . 'mail')->rows($rows)->where('id = ?', $row['id']));
+        return false;
     }
 
     /**
@@ -173,6 +256,7 @@ class Action extends Widget implements \Widget\ActionInterface
      */
     private function processMail(): bool
     {
+        $ok = true;
         $this->_email = new Email();
 
         //发件人邮箱
@@ -192,28 +276,20 @@ class Action extends Widget implements \Widget\ActionInterface
         //向博主发信
         // TODO $this->_comment->parent === '0' // parent === ‘0’ 时 为根评论
         // 如果在此处判断 会导致 别人评论别人的评论时 不会发送邮件给博主 后续fix
-        if (in_array($this->_comment->status, $this->_cfg->status) && $this->_comment->type !== '1' && in_array('to_owner', $this->_cfg->other) && ($toMe || $this->_comment->ownerId != $this->_comment->authorId)) {
-            if (!$this->_cfg->mail) {
-                self::widget('\Widget\Users\Author@temp' . $this->_comment->cid, ['uid' => $this->_comment->ownerId])->to($user);
-                $this->_email->reciver = $user->mail;
-            } else {
-                $this->_email->reciver = $this->_cfg->mail;
-            }
-            if (!$this->_cfg->name) {
-                self::widget('\Widget\Users\Author@temp' . $this->_comment->cid, ['uid' => $this->_comment->ownerId])->to($user);
-                $this->_email->reciverName = $user->name;
-            } else {
-                $this->_email->reciverName = $this->_cfg->name;
-            }
+        if (!in_array('owner', $this->_comment->done) && in_array($this->_comment->status, $this->_cfg->status) && $this->_comment->type !== '1' && in_array('to_owner', $this->_cfg->other) && ($toMe || $this->_comment->ownerId != $this->_comment->authorId)) {
+            // 收件人为文章作者；设置了“接收邮件的地址”时改用该地址
+            self::widget('\Widget\Users\Author@temp' . $this->_comment->cid, ['uid' => $this->_comment->ownerId])->to($user);
+            $this->_email->reciver = $this->_cfg->mail ?: $user->mail;
+            $this->_email->reciverName = $user->name;
 
             // 设置邮件回复信息
             $this->_email->replyTo = $this->_comment->mail; //评论者的邮箱
             $this->_email->replyToName = $this->_comment->author;
-            $this->authorMail()->sendMail();
+            $ok = $this->checkSent($this->authorMail()->sendMail(), 'owner') && $ok;
         }
 
         /** 向访客发信 */
-        if ($this->_comment->parent !== '0' && $this->_comment->status == 'approved' && in_array('to_guest', $this->_cfg->other)) {
+        if (!in_array('guest', $this->_comment->done) && $this->_comment->parent !== '0' && $this->_comment->status == 'approved' && in_array('to_guest', $this->_cfg->other)) {
             /**  如果联系我的邮件地址为空，则使用文章作者的邮件地址 */
             if (!$this->_cfg->contactme) {
                 if (!isset($user) || !$user) {
@@ -224,23 +300,56 @@ class Action extends Widget implements \Widget\ActionInterface
                 $this->_comment->contactme = $this->_cfg->contactme;
             }
 
-            $original = $this->_db->fetchRow($this->_db->select('author', 'mail', 'text')->from('table.comments')->where('coid = ?', $this->_comment->parent));
-            // 被评论者
-            if (in_array('to_me', $this->_cfg->other) || $this->_comment->mail != $original['mail']) {
-                $this->_comment->originalText   = $original['text'];
-                $this->_comment->originalAuthor = $original['author'];
+            // 查询被回复的评论，包含状态检查以避免处理已删除的评论
+            $original = $this->_db->fetchRow($this->_db->select('author', 'mail', 'text', 'status')->from('table.comments')->where('coid = ? AND status = ?', $this->_comment->parent, 'approved'));
+            
+            // 被评论者 - 增加原评论存在性检查
+            if (!$original) {
+                // 记录原评论不存在的情况（可能已被删除）
+                error_log("[CommentToMail] Warning: Original comment (ID: {$this->_comment->parent}) not found or not approved for reply notification");
+            }
+            
+            if ($original && (in_array('to_me', $this->_cfg->other) || $this->_comment->mail != ($original['mail'] ?? ''))) {
+                // 安全地处理原评论数据，防止 null 值
+                $this->_comment->originalText   = $original['text'] ?? '[原评论已删除]';
+                $this->_comment->originalAuthor = $original['author'] ?? '匿名用户';
+                $this->_comment->originalMail   = $original['mail'] ?? '';
 
-                $this->_email->reciver = $original['mail'];
-                $this->_email->reciverName = $original['author'];
-                $this->_email->replyTo  = $this->_comment->mail; //当前评论者的邮箱
-                $this->_email->replyToName = $this->_comment->author ? $this->_comment->author : $this->_options->title;
-                $this->guestMail()->sendMail();
+                // 检查收件人邮箱是否有效
+                $receiverMail = $original['mail'] ?? '';
+                if (!empty($receiverMail) && filter_var($receiverMail, FILTER_VALIDATE_EMAIL)) {
+                    $this->_email->reciver = $receiverMail;
+                    $this->_email->reciverName = $original['author'] ?? '匿名用户';
+                    $this->_email->replyTo  = $this->_comment->mail; //当前评论者的邮箱
+                    $this->_email->replyToName = $this->_comment->author ? $this->_comment->author : $this->_options->title;
+                    $ok = $this->checkSent($this->guestMail()->sendMail(), 'guest') && $ok;
+                } else {
+                    // 记录无效邮箱的情况
+                    error_log("[CommentToMail] Warning: Invalid or empty receiver email address for original comment (ID: {$this->_comment->parent}): '{$receiverMail}'");
+                }
             }
         }
 
-        unset($this->_comment); //销毁评论对象
-        unset($this->_email); //销毁对象
-        return true;
+        unset($this->_email); //销毁对象（评论对象由 deliverRow 写回队列，不在此销毁）
+        // 只有实际发送成功（或无需发送）才算完成；失败的保留在队列里等待下次重试
+        return $ok;
+    }
+
+    /**
+     * 检查 sendMail 的结果：成功记入 done（重试时跳过），失败记录日志
+     *
+     * @param bool|string|null $result sendMail 返回值：true 表示成功，字符串为错误信息
+     * @param string $target owner|guest
+     * @return bool
+     */
+    private function checkSent($result, string $target): bool
+    {
+        if ($result === true) {
+            $this->_comment->done[] = $target;
+            return true;
+        }
+        error_log('[CommentToMail] send to ' . $target . ' failed (coid ' . ($this->_comment->coid ?? '?') . '): ' . (is_string($result) ? $result : 'unknown error'));
+        return false;
     }
 
     /**
@@ -255,33 +364,21 @@ class Action extends Widget implements \Widget\ActionInterface
             "waiting"  => '待审',
             "spam"     => '垃圾'
         ];
-        $search  = array(
-            '{{siteTitle}}',
-            '{{title}}',
-            '{{author}}',
-            '{{ip}}',
-            '{{mail}}',
-            '{{permalink}}',
-            '{{manage}}',
-            '{{text}}',
-            '{{time}}',
-            '{{status}}'
-        );
-        $replace = [
-            $this->_options->title,
-            $this->_comment->title,
-            $this->_comment->author,
-            $this->_comment->ip,
-            $this->_comment->mail,
-            $this->_comment->permalink,
-            $this->_options->siteUrl . __TYPECHO_ADMIN_DIR__ . "manage-comments.php",
-            $this->_comment->text,
-            $date->format('Y-m-d H:i:s'),
-            $status[$this->_comment->status]
+        $vars = [
+            '{{siteTitle}}' => $this->_options->title,
+            '{{title}}'     => $this->_comment->title,
+            '{{author}}'    => $this->_comment->author,
+            '{{ip}}'        => $this->_comment->ip,
+            '{{mail}}'      => $this->_comment->mail,
+            '{{permalink}}' => $this->_comment->permalink,
+            '{{manage}}'    => $this->_options->siteUrl . __TYPECHO_ADMIN_DIR__ . "manage-comments.php",
+            '{{text}}'      => $this->_comment->text,
+            '{{time}}'      => $date->format('Y-m-d H:i:s'),
+            '{{status}}'    => $status[$this->_comment->status] ?? $this->_comment->status,
         ];
 
-        $this->_email->msgHtml = str_replace($search, $replace, $this->getTemplate('owner'));
-        $this->_email->subject = str_replace($search, $replace, $this->_email->titleForOwner);
+        $this->_email->msgHtml = $this->renderHtml($this->getTemplate('owner'), $vars, ['{{text}}']);
+        $this->_email->subject = strtr($this->_email->titleForOwner, $vars);
         $this->_email->altBody = "作者:" . $this->_comment->author . "\r\n链接:" . $this->_comment->permalink . "\r\n评论:\r\n" . $this->_comment->text;
 
         return $this;
@@ -293,39 +390,46 @@ class Action extends Widget implements \Widget\ActionInterface
     public function guestMail()
     {
         $date = new \Typecho\Date($this->_comment->created);
-        $search = [
-            '{{siteTitle}}',
-            '{{title}}',
-            '{{author_p}}',
-            '{{author}}',
-            '{{permalink}}',
-            '{{text}}',
-            '{{text_p}}',
-            '{{contactme}}',
-            '{{time}}'
-        ];
-        $replace = [
-            $this->_options->title,
-            $this->_comment->title,
-            $this->_comment->originalAuthor,
-            $this->_comment->author,
-            $this->_comment->permalink,
-            $this->_comment->text,
-            $this->_comment->originalText,
-            $this->_comment->contactme,
-            $date->format('Y-m-d H:i:s'),
+        $vars = [
+            '{{siteTitle}}' => $this->_options->title,
+            '{{title}}'     => $this->_comment->title,
+            '{{author_p}}'  => $this->_comment->originalAuthor,
+            '{{author}}'    => $this->_comment->author,
+            '{{permalink}}' => $this->_comment->permalink,
+            '{{text}}'      => $this->_comment->text,
+            '{{text_p}}'    => $this->_comment->originalText,
+            '{{contactme}}' => $this->_comment->contactme,
+            '{{time}}'      => $date->format('Y-m-d H:i:s'),
         ];
 
-        $this->_email->msgHtml = str_replace($search, $replace, $this->getTemplate('guest'));
-        $this->_email->subject = str_replace($search, $replace, $this->_email->titleForGuest);
+        $this->_email->msgHtml = $this->renderHtml($this->getTemplate('guest'), $vars, ['{{text}}', '{{text_p}}']);
+        $this->_email->subject = strtr($this->_email->titleForGuest, $vars);
         $this->_email->altBody = "作者:" . $this->_comment->author . "\r\n链接:" . $this->_comment->permalink . "\r\n评论:\r\n" . $this->_comment->text;
 
         return $this;
     }
 
     /**
+     * 渲染 HTML 模板：变量值先转义再替换，防止评论者写入的 HTML 注入到邮件正文
+     *
+     * @param string $template 模板内容
+     * @param array $vars 占位符 => 原始值
+     * @param array $multiline 需要保留换行的占位符（评论正文）
+     * @return string
+     */
+    private function renderHtml(string $template, array $vars, array $multiline = []): string
+    {
+        foreach ($vars as $placeholder => $value) {
+            $value = htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+            $vars[$placeholder] = in_array($placeholder, $multiline) ? nl2br($value) : $value;
+        }
+
+        return strtr($template, $vars);
+    }
+
+    /**
      * 发送邮件
-     * 
+     *
      * @return bool|string|null
      */
     public function sendMail(): bool|string|NULL
@@ -334,6 +438,7 @@ class Action extends Widget implements \Widget\ActionInterface
         $mailer = new PHPMailer();
         $mailer->CharSet = 'UTF-8';
         $mailer->Encoding = 'base64';
+        $mailer->Timeout = 15; // 默认 300 秒，SMTP 卡住时会长时间占用 PHP 进程
 
         /** 选择发信模式 */
         switch ($this->_cfg->mode) {
@@ -367,7 +472,10 @@ class Action extends Widget implements \Widget\ActionInterface
 
         $mailer->MsgHTML($this->_email->msgHtml);
         $mailer->AddAddress($this->_email->reciver, $this->_email->reciverName);
-        $mailer->SMTPOptions = array('ssl' => array('verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true));
+        // 默认校验 SMTP 证书，防止中间人截获账号密码；自签名证书的服务器需在设置中显式勾选跳过
+        if (in_array('insecure', $this->_cfg->validate)) {
+            $mailer->SMTPOptions = array('ssl' => array('verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true));
+        }
 
         $result = $mailer->Send();
         if (!$result) $result = $mailer->ErrorInfo;
@@ -404,7 +512,13 @@ class Action extends Widget implements \Widget\ActionInterface
             $this->response->goBack();
         }
 
-        $email = $this->request->from('toName', 'to', 'title', 'content');
+        $email = $this->request->from('template', 'toName', 'to', 'title', 'content');
+        $template = in_array($email['template'], ['owner', 'guest'], true) ? $email['template'] : null;
+
+        if (!$template && (trim((string) $email['title']) === '' || trim((string) $email['content']) === '')) {
+            $this->widget('\Widget\Notice')->set(_t('不使用模板时，邮件标题和内容不能为空'), 'error');
+            $this->response->goBack();
+        }
 
         $this->_email = new Email();
 
@@ -412,20 +526,61 @@ class Action extends Widget implements \Widget\ActionInterface
         $this->_email->fromName = $this->_cfg->fromName ? $this->_cfg->fromName : $this->_options->title;
         $this->_email->reciver = $email['to'] ? $email['to'] : $this->_user->mail;
         $this->_email->reciverName = $email['toName'] ? $email['toName'] : $this->_user->screenName;
-        $this->_email->subject = $email['title'];
-        $this->_email->altBody = $email['content'];
-        $this->_email->msgHtml = $email['content'];
+
+        if ($template) {
+            // 用示例评论走与真实通知相同的渲染流程
+            $this->_comment = $this->sampleComment($template);
+            $this->_email->titleForOwner = (string) $this->_cfg->titleForOwner;
+            $this->_email->titleForGuest = (string) $this->_cfg->titleForGuest;
+            $template === 'owner' ? $this->authorMail() : $this->guestMail();
+            if (trim((string) $email['title']) !== '') $this->_email->subject = $email['title'];
+        } else {
+            $this->_email->subject = $email['title'];
+            $this->_email->altBody = $email['content'];
+            $this->_email->msgHtml = $email['content'];
+        }
 
         $result = $this->sendMail();
+        $sent = $result === true; // 失败时 sendMail 返回错误信息字符串，不能按真值判断
 
         /** 提示信息 */
         $this->widget('\Widget\Notice')->set(
-            $result ? _t('邮件发送成功') : _t('邮件发送失败: ' . $result),
-            $result ? 'success' : 'notice'
+            $sent ? _t('邮件发送成功') : _t('邮件发送失败: ') . $result,
+            $sent ? 'success' : 'notice'
         );
 
         /** 转向原页 */
         $this->response->goBack();
+    }
+
+    /**
+     * 测试邮件用的示例评论
+     *
+     * @param string $template owner|guest
+     * @return Comment
+     */
+    private function sampleComment(string $template): Comment
+    {
+        $comment = new Comment();
+        $comment->created = time();
+        $comment->title = '示例文章';
+        $comment->permalink = $this->_options->siteUrl;
+        $comment->mail = 'visitor@example.com';
+        $comment->ip = '127.0.0.1';
+        $comment->status = 'waiting';
+        $comment->text = "这是一条示例评论，用于预览邮件模板。\n第二行用来检查换行显示。";
+        if ($template === 'guest') {
+            // 访客回复场景：博主回复了访客的评论
+            $comment->author = $this->_user->screenName;
+            $comment->originalAuthor = '示例访客';
+            $comment->originalText = "这是访客之前发表的示例评论。\n第二行用来检查换行显示。";
+            $comment->text = '这是博主的示例回复。';
+        } else {
+            $comment->author = '示例访客';
+        }
+        $comment->contactme = $this->_cfg->contactme ?: $this->_user->mail;
+
+        return $comment;
     }
 
     /**
@@ -435,12 +590,16 @@ class Action extends Widget implements \Widget\ActionInterface
      */
     public function editTheme($file)
     {
+        // 只允许编辑模板目录下已有的 .html 文件，防止 ../ 路径穿越写入任意文件
+        $file = basename((string) $file);
         $path = $this->_template_dir . $file;
 
-        if (file_exists($path) && is_writeable($path)) {
-            $handle = fopen($path, 'wb');
-            if ($handle && fwrite($handle, $this->request->content)) {
-                fclose($handle);
+        if (preg_match('/^[_0-9a-z-]+\.html$/i', $file) && file_exists($path) && is_writeable($path)) {
+            $content = (string) $this->request->content;
+            // 先校验再写入：原实现先 fopen('wb') 清空文件，内容为空时再报“无法写入”，模板已被清空
+            if (trim($content) === '') {
+                $this->widget('Widget_Notice')->set(_t("模板内容不能为空，文件 %s 未修改", $file), 'error');
+            } elseif (file_put_contents($path, $content) !== false) {
                 $this->widget('Widget_Notice')->set(_t("文件 %s 的更改已经保存", $file), 'success');
             } else {
                 $this->widget('Widget_Notice')->set(_t("文件 %s 无法被写入", $file), 'error');

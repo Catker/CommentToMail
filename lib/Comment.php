@@ -24,124 +24,138 @@ class Comment
 	 *
 	 * @var int
 	 */
-	public int $cid;
+	public int $cid = 0;
 
 	/**
 	 * 评论ID
 	 *
 	 * @var int
 	 */
-	public int $coid;
+	public int $coid = 0;
 
 	/**
 	 * 评论创建时间
 	 *
 	 * @var integer
 	 */
-	public int $created;
+	public int $created = 0;
 
 	/**
 	 * 评论作者
 	 *
 	 * @var string
 	 */
-	public string $author;
+	public string $author = '';
 
 	/**
 	 * 作者ID
 	 *
 	 * @var int
 	 */
-	public int $authorId;
+	public int $authorId = 0;
 
 	/**
 	 * 不知道什么玩意儿
 	 *
 	 * @var integer
 	 */
-	public int $ownerId;
+	public int $ownerId = 0;
 
 	/**
 	 * 邮箱
 	 *
 	 * @var string
 	 */
-	public string $mail;
+	public string $mail = '';
 
 	/**
 	 * ip
 	 *
 	 * @var string
 	 */
-	public string $ip;
+	public string $ip = '';
 
 	/**
 	 * 文章名称
 	 *
 	 * @var string
 	 */
-	public string $title;
+	public string $title = '';
 
 	/**
 	 * 邮件内容
 	 *
 	 * @var string
 	 */
-	public string $text;
+	public string $text = '';
 
 	/**
 	 * 评论地址
 	 *
 	 * @var string
 	 */
-	public string $permalink;
+	public string $permalink = '';
 
 	/**
 	 * 状态
 	 *
 	 * @var string
 	 */
-	public string $status;
+	public string $status = '';
 
 	/**
 	 * 被评论者
 	 *
 	 * @var string
 	 */
-	public string $parent;
+	public string $parent = '';
 
 	/**
 	 * 对于访客时 访客的原始文字
 	 *
 	 * @var string
 	 */
-	public string $originalText;
+	public string $originalText = '';
 
 	/**
 	 * 对于访客时 访客的名称
 	 *
 	 * @var string
 	 */
-	public string $originalAuthor;
+	public string $originalAuthor = '';
 
 	/**
 	 * 对于访客时 访客的邮件地址
 	 *
 	 * @var string
 	 */
-	public string $originalMail;
+	public string $originalMail = '';
 
 	/**
 	 * 模版中联系我的邮箱
 	 *
 	 * @var string
 	 */
-	public string $contactme;
+	public string $contactme = '';
 
 	/**
 	 * 评论类型 1 > 仅向访客发送邮件 2 > 向博主和访客发送邮件
 	 *
 	 * @var string
 	 */
-	public string $type;
+	public string $type = '2';
+
+	/**
+	 * 已发送成功的对象 owner|guest，重试时跳过，避免重复发信
+	 *
+	 * @var array
+	 */
+	public array $done = [];
+
+	/**
+	 * 已失败的投递次数
+	 *
+	 * @var int
+	 */
+	public int $attempts = 0;
 }
